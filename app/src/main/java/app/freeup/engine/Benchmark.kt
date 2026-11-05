@@ -17,6 +17,7 @@ object Benchmark {
             Transcoder.transcode(
                 context, video.uri, out, plan.outputMime, plan.videoBitrate,
                 SourceMetadata(null, null), clipMs = clip,
+                maxShortSide = plan.maxShortSide, toneMapHdr = plan.toneMapHdr,
             )
         }.isSuccess
         val seconds = (SystemClock.elapsedRealtime() - started) / 1000.0

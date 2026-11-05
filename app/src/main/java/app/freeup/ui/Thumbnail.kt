@@ -1,5 +1,6 @@
 package app.freeup.ui
 
+import android.net.Uri
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.foundation.Image
@@ -21,15 +22,18 @@ import kotlinx.coroutines.withContext
 private val cache = LruCache<Long, ImageBitmap>(240)
 
 @Composable
-fun VideoThumbnail(video: Video, modifier: Modifier = Modifier) {
+fun VideoThumbnail(video: Video, modifier: Modifier = Modifier) = VideoThumbnail(video.id, video.uri, modifier)
+
+@Composable
+fun VideoThumbnail(id: Long, uri: Uri, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val bitmap by produceState(cache.get(video.id), video.id) {
+    val bitmap by produceState(cache.get(id), id) {
         if (value == null) {
             value = withContext(Dispatchers.IO) {
                 runCatching {
-                    context.contentResolver.loadThumbnail(video.uri, Size(320, 320), null).asImageBitmap()
+                    context.contentResolver.loadThumbnail(uri, Size(480, 480), null).asImageBitmap()
                 }.getOrNull()
-            }?.also { cache.put(video.id, it) }
+            }?.also { cache.put(id, it) }
         }
     }
     val image = bitmap

@@ -20,6 +20,7 @@ import app.freeup.engine.Plan
 import app.freeup.engine.Prober
 import app.freeup.engine.PlanInput
 import app.freeup.engine.Quality
+import app.freeup.engine.SkipReason
 import app.freeup.engine.SpeedModel
 import app.freeup.engine.Transcoder
 import kotlinx.coroutines.Dispatchers
@@ -44,11 +45,33 @@ import kotlinx.coroutines.withContext
 enum class Access { NONE, PARTIAL, FULL }
 enum class Screen { GRID, CONFIRM, PROGRESS }
 
-data class VideoRow(val video: Video, val probe: Probe?, val plan: Plan) {
+private data class Extras(
+    val screen: Screen,
+    val measuring: Boolean,
+    val speedVersion: Int,
+    val freed: Long,
+    val storage: StorageInfo,
+)
+
+data class VideoRow(
+    val video: Video,
+    val probe: Probe?,
+    /** What happens to this video now (forced if you chose "Compress anyway"). */
+    val plan: Plan,
+    /** What "Compress anyway" would do, for a skipped video. Null when it can't be forced. */
+    val anyway: Plan.Compress?,
+    val forced: Boolean,
+) {
     val compress: Plan.Compress? get() = plan as? Plan.Compress
+    val skip: Plan.Skip? get() = plan as? Plan.Skip
     val saving: Long get() = compress?.let { video.sizeBytes - it.estimatedBytes } ?: 0
     val fps: Float get() = probe?.fps?.coerceIn(1f, 60f) ?: 30f
+
+    /** Saving FreeUp suggests without "Compress anyway". */
+    val suggestedSaving: Long get() = if (forced) 0 else saving
 }
+
+data class StorageInfo(val totalBytes: Long = 0, val freeBytes: Long = 0)
 
 data class BatchProgress(
     val items: List<JobItem>,
@@ -72,12 +95,24 @@ data class UiState(
     val measuringSpeed: Boolean = false,
     val etaSeconds: Long = 0,
     val progress: BatchProgress? = null,
+    val freedSoFar: Long = 0,
+    val storage: StorageInfo = StorageInfo(),
 ) {
     val selectedRows get() = rows.filter { it.video.id in selected && it.compress != null }
     val selectedSize get() = selectedRows.sumOf { it.video.sizeBytes }
     val selectedSaving get() = selectedRows.sumOf { it.saving }
     val totalSize get() = rows.sumOf { it.video.sizeBytes }
-    val totalSaving get() = rows.sumOf { it.saving }
+    val totalSaving get() = rows.sumOf { it.suggestedSaving }
+    val compressibleCount get() = rows.count { it.compress != null && !it.forced }
+
+    /** Caveats from "Compress anyway" in the current selection, with how many videos each covers. */
+    val selectedOverrides: List<Pair<app.freeup.engine.SkipReason, Int>>
+        get() = selectedRows.mapNotNull { it.compress?.overridden }.groupingBy { it }.eachCount().toList()
+
+    /** Why the rest are left alone, most common first. */
+    val skipCounts: List<Pair<SkipReason, Int>>
+        get() = rows.mapNotNull { (it.plan as? Plan.Skip)?.reason }
+            .groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { it.key to it.value }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -92,13 +127,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val videos = MutableStateFlow<List<Video>>(emptyList())
     private val probes = MutableStateFlow<Map<Long, Probe>>(emptyMap())
     private val selected = MutableStateFlow<Set<Long>>(emptySet())
+    private val forced = MutableStateFlow<Set<Long>>(emptySet())
+    private val storage = MutableStateFlow(StorageInfo())
     private val quality = MutableStateFlow(Quality.BALANCED)
     private val screen = MutableStateFlow(Screen.GRID)
     private val measuring = MutableStateFlow(false)
     private val speedVersion = MutableStateFlow(0)
     private var probeJob: Job? = null
 
-    private val rows = combine(videos, probes, quality, dao.observeDone()) { list, probeMap, q, done ->
+    private val rows = combine(videos, probes, quality, dao.observeDone(), forced) { list, probeMap, q, done, forcedIds ->
         val doneSizes = done.associate { it.mediaId to it.newSize }
         list.map { v ->
             val p = probeMap[v.id]
@@ -116,7 +153,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 readable = p?.readable ?: true,
                 alreadyDone = doneSizes[v.id] == v.sizeBytes || p?.compressedByFreeUp == true,
             )
-            VideoRow(v, p, BitratePlanner.plan(input, q, hevc))
+            val normal = BitratePlanner.plan(input, q, hevc)
+            val anyway = if (normal is Plan.Skip && normal.reason.overridable) {
+                BitratePlanner.plan(input, q, hevc, force = true) as? Plan.Compress
+            } else {
+                null
+            }
+            val isForced = v.id in forcedIds && anyway != null
+            VideoRow(v, p, if (isForced) anyway!! else normal, anyway, isForced)
         }
     }
 
@@ -139,11 +183,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         UiState(access = a, loading = l, rows = r, selected = s, quality = q)
     }
 
-    val state: StateFlow<UiState> = combine(base, screen, measuring, speedVersion, progress) { b, sc, m, _, p ->
+    private val extras = combine(screen, measuring, speedVersion, dao.observeFreed(), storage) { sc, m, v, f, st ->
+        Extras(sc, m, v, f, st)
+    }
+
+    val state: StateFlow<UiState> = combine(base, extras, progress) { b, x, p ->
+        val sc = x.screen
+        val m = x.measuring
         val eta = b.selectedRows.sumOf { speed.secondsFor(it.video.width, it.video.height, it.fps, it.video.durationMs) }
         // Show progress whenever a batch is still going, even after the app was reopened.
         val effectiveScreen = if (p?.running == true) Screen.PROGRESS else sc
-        b.copy(screen = effectiveScreen, measuringSpeed = m, etaSeconds = eta.toLong(), progress = p)
+        b.copy(screen = effectiveScreen, measuringSpeed = m, etaSeconds = eta.toLong(), progress = p, freedSoFar = x.freed, storage = x.storage)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
 
     fun onAccess(newAccess: Access) {
@@ -154,9 +204,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun reload() {
         viewModelScope.launch {
             loading.value = true
+            storage.value = readStorage()
             val list = repo.loadVideos()
             videos.value = list
-            selected.update { s -> s.filterTo(mutableSetOf()) { id -> list.any { it.id == id } } }
+            val ids = list.mapTo(HashSet()) { it.id }
+            selected.update { s -> s.filterTo(mutableSetOf()) { it in ids } }
+            forced.update { s -> s.filterTo(mutableSetOf()) { it in ids } }
             loading.value = false
             probeAll(list)
         }
@@ -178,14 +231,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun toggle(id: Long) = selected.update { if (id in it) it - id else it + id }
-
-    fun selectTopBiggest(n: Int = 10) {
-        val ids = state.value.rows.filter { it.compress != null }.sortedByDescending { it.saving }.take(n).map { it.video.id }
-        selected.value = ids.toSet()
+    fun toggle(id: Long) {
+        if (id in selected.value) {
+            selected.update { it - id }
+            forced.update { it - id }
+        } else {
+            selected.update { it + id }
+        }
     }
 
-    fun clearSelection() { selected.value = emptySet() }
+    /** "Compress anyway": you accept the caveat for a video FreeUp would have skipped. */
+    fun compressAnyway(id: Long) {
+        forced.update { it + id }
+        selected.update { it + id }
+    }
+
+    fun selectTopBiggest(n: Int = 10) {
+        val ids = state.value.rows.filter { it.compress != null && !it.forced }
+            .sortedByDescending { it.saving }.take(n).map { it.video.id }
+        selected.update { current -> current.filterTo(mutableSetOf()) { it in forced.value } + ids }
+    }
+
+    fun clearSelection() {
+        selected.value = emptySet()
+        forced.value = emptySet()
+    }
+
+    private fun readStorage(): StorageInfo = runCatching {
+        val stat = android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path)
+        StorageInfo(stat.totalBytes, stat.availableBytes)
+    }.getOrDefault(StorageInfo())
 
     fun setQuality(q: Quality) { quality.value = q }
 
@@ -235,6 +310,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 fps = row.fps,
                 targetBitrate = plan.videoBitrate,
                 videoMime = plan.outputMime,
+                maxShortSide = plan.maxShortSide,
+                toneMapHdr = plan.toneMapHdr,
+                overridden = plan.overridden?.name,
                 dateTakenMs = row.video.dateTakenMs,
                 creationTimeMs = row.probe?.creationTimeMs,
                 latitude = row.probe?.location?.first,
@@ -245,6 +323,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { Jobs.start(getApplication(), items) }
             selected.value = emptySet()
+            forced.value = emptySet()
             screen.value = Screen.PROGRESS
         }
     }

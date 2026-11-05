@@ -94,6 +94,8 @@ private fun App(vm: MainViewModel) {
         else -> VideoGridScreen(
             state = state,
             onToggle = vm::toggle,
+            onCompressAnyway = vm::compressAnyway,
+            onQuality = vm::setQuality,
             onSelectTop = { vm.selectTopBiggest() },
             onClear = vm::clearSelection,
             onReview = vm::openConfirm,

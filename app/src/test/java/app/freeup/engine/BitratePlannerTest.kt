@@ -72,6 +72,36 @@ class BitratePlannerTest {
         assertTrue(BitratePlanner.plan(camera, Quality.BALANCED, true) is Plan.Compress)
     }
 
+    @Test fun smallestDownscalesTo720p() {
+        // A 10-minute 4K concert at 50 Mbps: about 3.75 GB.
+        val concert = input(3750.0, 600, 3840, 2160)
+        val plan = BitratePlanner.plan(concert, Quality.SMALLEST, true) as Plan.Compress
+        assertEquals(1280 to 720, plan.outWidth to plan.outHeight)
+        assertEquals(720, plan.maxShortSide)
+        assertTrue("estimated ${plan.estimatedBytes}", plan.estimatedBytes < 250_000_000)
+        // Portrait keeps its orientation.
+        assertEquals(720 to 1280, BitratePlanner.outputSize(1080, 1920, 720))
+        // Already 720p or smaller: no scaling.
+        assertEquals(480 to 864, BitratePlanner.outputSize(480, 864, 720))
+    }
+
+    @Test fun compressAnywayOverridesSoftReasonsButStillShrinks() {
+        val small = input(30.0, 60) // ~4 Mbps 1080p
+        assertEquals(Plan.Skip(SkipReason.ALREADY_SMALL), BitratePlanner.plan(small, Quality.BALANCED, true))
+        val forced = BitratePlanner.plan(small, Quality.BALANCED, true, force = true) as Plan.Compress
+        assertEquals(SkipReason.ALREADY_SMALL, forced.overridden)
+        assertTrue(forced.estimatedBytes < 30_000_000 * 0.8)
+
+        val hdr = BitratePlanner.plan(input(400.0, 60, hdr = true), Quality.BALANCED, true, force = true) as Plan.Compress
+        assertTrue(hdr.toneMapHdr)
+        assertEquals(SkipReason.HDR, hdr.overridden)
+
+        // A tiny low-bitrate clip has nothing to gain even when forced.
+        assertEquals(Plan.Skip(SkipReason.NO_GAIN), BitratePlanner.plan(input(0.5, 10, 480, 360), Quality.BALANCED, true, force = true))
+        // Unsupported formats can never be forced.
+        assertEquals(Plan.Skip(SkipReason.UNSUPPORTED), BitratePlanner.plan(input(400.0, 60, mime = "video/webm"), Quality.BALANCED, true, force = true))
+    }
+
     @Test fun hdrSlowMotionAndOtherContainersAreSkipped() {
         assertEquals(Plan.Skip(SkipReason.HDR), BitratePlanner.plan(input(400.0, 60, hdr = true), Quality.BALANCED, true))
         assertEquals(Plan.Skip(SkipReason.HIGH_FPS), BitratePlanner.plan(input(400.0, 60, fps = 120f), Quality.BALANCED, true))

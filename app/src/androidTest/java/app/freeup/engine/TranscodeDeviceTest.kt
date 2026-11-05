@@ -68,7 +68,30 @@ class TranscodeDeviceTest {
             assertEquals(info, probe.location, loc?.let(Prober::parseIso6709))
         }
         out.delete()
-        src.delete()
+    }
+
+    @Test
+    fun smallestScalesTo720p(): Unit = runBlocking {
+        val src = File(context.filesDir, "camera_style.mp4")
+        if (!src.exists()) copyFromShell("/data/local/tmp/camera_style.mp4", src)
+        assumeTrue("test clip not pushed", src.length() > 0)
+        val out = File(context.filesDir, "camera_style_720.mp4")
+        Transcoder.transcode(
+            context, Uri.fromFile(src), out, BitratePlanner.HEVC, 2_300_000,
+            SourceMetadata(null, null), maxShortSide = 720,
+        )
+        val (w, h) = displayedSize(out)
+        val (sw, sh) = displayedSize(src)
+        assertEquals("short side", 720, minOf(w, h))
+        assertEquals("orientation kept", sw > sh, w > h)
+        assertNull(Verifier.check(out, 6_000, src.length()))
+        out.delete()
+    }
+
+    /** Opening the real database runs the 1 → 2 migration on a phone that has job history. */
+    @Test
+    fun databaseOpensAfterUpgrade(): Unit = runBlocking {
+        app.freeup.data.AppDb.get(context).jobs().latestBatch()
     }
 
     /** Width and height as a player shows it, after applying the rotation tag. */

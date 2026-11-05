@@ -129,6 +129,8 @@ class CompressWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     videoMime = item.videoMime,
                     videoBitrate = item.targetBitrate,
                     metadata = metadata,
+                    maxShortSide = item.maxShortSide,
+                    toneMapHdr = item.toneMapHdr,
                     onProgress = { currentFraction = it },
                 )
             }

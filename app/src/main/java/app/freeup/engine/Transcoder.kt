@@ -13,11 +13,14 @@ import androidx.annotation.OptIn
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.container.MdtaMetadataEntry
+import androidx.media3.effect.Presentation
 import androidx.media3.container.Mp4LocationData
 import androidx.media3.container.Mp4TimestampData
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.EncoderUtil
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
@@ -51,6 +54,7 @@ object Transcoder {
     /**
      * Re-encodes [input] to [output] with the phone's hardware encoder. Audio is copied as is when
      * possible. [clipMs] limits the encode to the first part of the video (used to measure speed).
+     * [maxShortSide] scales the video down (720 = 720p). [toneMapHdr] converts HDR to standard range.
      */
     suspend fun transcode(
         context: Context,
@@ -60,6 +64,8 @@ object Transcoder {
         videoBitrate: Int,
         metadata: SourceMetadata,
         clipMs: Long? = null,
+        maxShortSide: Int? = null,
+        toneMapHdr: Boolean = false,
         onProgress: (Float) -> Unit = {},
     ): ExportResult {
         output.parentFile?.mkdirs()
@@ -152,7 +158,17 @@ object Transcoder {
                         )
                     }
                 }.build()
-                transformer.start(EditedMediaItem.Builder(item).build(), output.absolutePath)
+                val edited = EditedMediaItem.Builder(item).apply {
+                    if (maxShortSide != null) {
+                        setEffects(Effects(emptyList(), listOf(Presentation.createForShortSide(maxShortSide))))
+                    }
+                }.build()
+                val composition = Composition.Builder(EditedMediaItemSequence.Builder(edited).build())
+                    .setHdrMode(
+                        if (toneMapHdr) Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL else Composition.HDR_MODE_KEEP_HDR,
+                    )
+                    .build()
+                transformer.start(composition, output.absolutePath)
                 main.post(poll)
             }
 

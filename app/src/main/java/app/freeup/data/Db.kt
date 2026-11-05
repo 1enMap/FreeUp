@@ -11,6 +11,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Update
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /** Where each file is in the compress pipeline. Saved so a killed process can pick up safely. */
@@ -46,6 +48,12 @@ data class JobItem(
     val fps: Float,
     val targetBitrate: Int,
     val videoMime: String,
+    /** Scale the short side down to this (720 = 720p), or null to keep the resolution. */
+    val maxShortSide: Int? = null,
+    /** Convert HDR to standard range: chosen with "Compress anyway" on an HDR video. */
+    val toneMapHdr: Boolean = false,
+    /** The skip reason you overrode with "Compress anyway", if any. */
+    val overridden: String? = null,
     val dateTakenMs: Long?,
     val creationTimeMs: Long?,
     val latitude: Float?,
@@ -87,19 +95,33 @@ interface JobDao {
     @Query("UPDATE job_items SET state = :cancelled, finishedAt = :now WHERE state = :queued")
     suspend fun cancelQueued(now: Long, cancelled: String = JobState.CANCELLED, queued: String = JobState.QUEUED)
 
+    /** Space freed by every video FreeUp has replaced, as far as its history goes back. */
+    @Query("SELECT COALESCE(SUM(originalSize - newSize), 0) FROM job_items WHERE state = :done AND newSize IS NOT NULL")
+    fun observeFreed(done: String = JobState.DONE): Flow<Long>
+
     @Query("SELECT mediaId, newSize FROM job_items WHERE state = :done AND newSize IS NOT NULL")
     fun observeDone(done: String = JobState.DONE): Flow<List<DoneRecord>>
 }
 
-@Database(entities = [JobItem::class], version = 1)
+@Database(entities = [JobItem::class], version = 2)
 abstract class AppDb : RoomDatabase() {
     abstract fun jobs(): JobDao
 
     companion object {
         @Volatile private var instance: AppDb? = null
 
+        /** Adds the 720p, HDR and "Compress anyway" options; keeps the job history. */
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE job_items ADD COLUMN maxShortSide INTEGER")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN toneMapHdr INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN overridden TEXT")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "freeup.db")
+                .addMigrations(MIGRATION_1_2)
                 .build().also { instance = it }
         }
     }

@@ -88,7 +88,43 @@ class TranscodeDeviceTest {
         out.delete()
     }
 
-    /** Opening the real database runs the 1 → 2 migration on a phone that has job history. */
+    /** MKV with 5.1 AAC, a second audio track and subtitles → MP4 with stereo AAC. Push files/film.mkv first. */
+    @Test
+    fun convertsMkvWithSurroundToStereoMp4(): Unit = runBlocking {
+        val src = File(context.filesDir, "film.mkv")
+        assumeTrue("film.mkv not pushed", src.length() > 0)
+        val probe = Prober.probe(context, Uri.fromFile(src))
+        assertEquals("audio/mp4a-latm", probe.audioMime)
+        assertEquals(6, probe.audioChannels)
+        assertEquals(2, probe.audioTracks)
+        assertEquals(1, probe.subtitleTracks)
+
+        val out = File(context.filesDir, "film_out.mp4")
+        Transcoder.transcode(
+            context, Uri.fromFile(src), out, BitratePlanner.HEVC, 4_000_000,
+            SourceMetadata(null, null), downmixFromChannels = 6,
+        )
+        assertNull(Verifier.check(out, 12_000, src.length()))
+        val result = Prober.probe(context, Uri.fromFile(out))
+        assertEquals(BitratePlanner.HEVC, result.videoMime)
+        assertEquals("audio/mp4a-latm", result.audioMime)
+        assertEquals(2, result.audioChannels)
+        assertTrue(result.compressedByFreeUp)
+        out.delete()
+    }
+
+    /** E-AC3 in MKV: probing must say whether this phone lets apps decode it. Push files/film_eac3.mkv. */
+    @Test
+    fun reportsWhetherDolbyAudioIsDecodable() {
+        val src = File(context.filesDir, "film_eac3.mkv")
+        assumeTrue("film_eac3.mkv not pushed", src.length() > 0)
+        val probe = Prober.probe(context, Uri.fromFile(src))
+        assertEquals("audio/eac3", probe.audioMime)
+        assertEquals(Prober.hasDecoder("audio/eac3"), probe.audioDecodable)
+        android.util.Log.w("FreeUpDeviceTest", "eac3 decodable=${probe.audioDecodable}")
+    }
+
+    /** Opening the real database runs the migrations on a phone that has job history. */
     @Test
     fun databaseOpensAfterUpgrade(): Unit = runBlocking {
         app.freeup.data.AppDb.get(context).jobs().latestBatch()

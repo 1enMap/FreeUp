@@ -66,9 +66,14 @@ enum class SkipReason(
         "Nothing to gain", false,
         "This video is already so small that compressing it wouldn't free meaningful space.",
     ),
+    AUDIO_UNSUPPORTED(
+        "Sound not supported", false,
+        "This video's sound (often Dolby Digital AC-3 / E-AC-3) can't be decoded by apps on this phone, " +
+            "so FreeUp can't convert it without losing the audio.",
+    ),
     UNSUPPORTED(
         "Format not supported", false,
-        "FreeUp can only replace MP4 and MOV videos in place.",
+        "FreeUp can compress MP4, MOV, MKV, WebM, 3GP, AVI, TS and FLV videos, but not this one.",
     ),
     TOO_SHORT("Too short", false, "This video is too short to be worth compressing."),
     UNREADABLE("Can't read this file", false, "Android couldn't read this file. It may be damaged or still downloading."),
@@ -86,6 +91,12 @@ sealed interface Plan {
         val toneMapHdr: Boolean,
         /** Set when you chose "Compress anyway"; its caveat applies. */
         val overridden: SkipReason? = null,
+        /** Not MP4/MOV: saved as a new .mp4 file and the original deleted afterwards. */
+        val convertToMp4: Boolean = false,
+        /** Surround sound is mixed down to stereo (the MP4 can't keep it as is). */
+        val downmixToStereo: Boolean = false,
+        /** What changes because of the format conversion, shown before you start. */
+        val conversionNotes: List<String> = emptyList(),
     ) : Plan
 
     data class Skip(val reason: SkipReason) : Plan
@@ -105,6 +116,11 @@ data class PlanInput(
     val sourceCodec: String? = null,
     val readable: Boolean = true,
     val alreadyDone: Boolean = false,
+    val audioMime: String? = null,
+    val audioChannels: Int? = null,
+    val audioTracks: Int = 1,
+    val subtitleTracks: Int = 0,
+    val audioDecodable: Boolean = true,
 )
 
 /**
@@ -138,7 +154,18 @@ object BitratePlanner {
     /** "Compress anyway" never keeps more than this share of the source bitrate, so it always shrinks. */
     const val FORCED_MAX_SHARE = 0.7
 
-    private val SUPPORTED_CONTAINERS = setOf("video/mp4", "video/quicktime")
+    /** Replaced in place: same file, same gallery entry. */
+    private val IN_PLACE_CONTAINERS = setOf("video/mp4", "video/quicktime")
+
+    /** Converted: written as a new .mp4 next to the original, which is deleted after. */
+    val CONVERTIBLE_CONTAINERS = setOf(
+        "video/x-matroska", "video/matroska", "video/webm", "video/3gpp", "video/3gpp2",
+        "video/x-msvideo", "video/avi", "video/mp2ts", "video/MP2T", "video/x-flv",
+    )
+
+    /** Audio the MP4 file can hold as is; anything else is re-encoded to AAC. */
+    private val MP4_AUDIO = setOf("audio/mp4a-latm", "audio/opus", "audio/3gpp", "audio/amr-wb")
+    private const val REENCODED_AUDIO = 160_000
 
     fun targetBitrate(width: Int, height: Int, fps: Float, quality: Quality, hevc: Boolean): Int {
         val pixelsPerSecond = width.toDouble() * height * fps.coerceIn(1f, 60f)
@@ -161,7 +188,8 @@ object BitratePlanner {
      */
     fun plan(input: PlanInput, quality: Quality, hevcAvailable: Boolean, force: Boolean = false): Plan {
         if (!input.readable) return Plan.Skip(SkipReason.UNREADABLE)
-        if (input.containerMime !in SUPPORTED_CONTAINERS) return Plan.Skip(SkipReason.UNSUPPORTED)
+        val convert = input.containerMime in CONVERTIBLE_CONTAINERS
+        if (input.containerMime !in IN_PLACE_CONTAINERS && !convert) return Plan.Skip(SkipReason.UNSUPPORTED)
         if (input.durationMs < 1_000 || input.width <= 0 || input.height <= 0) {
             return Plan.Skip(SkipReason.TOO_SHORT)
         }
@@ -183,7 +211,11 @@ object BitratePlanner {
         if (softReason != null && !force) return Plan.Skip(softReason)
         if (force) target = min(target.toDouble(), sourceVideoBitrate * FORCED_MAX_SHARE).toInt()
 
-        val estimated = ((target + audio) * input.durationMs / 1000.0 / 8 * CONTAINER_OVERHEAD).toLong()
+        val reencodeAudio = input.audioMime != null && input.audioMime !in MP4_AUDIO
+        val downmix = (input.audioChannels ?: 2) > 2 && (reencodeAudio || convert)
+        if ((reencodeAudio || downmix) && !input.audioDecodable) return Plan.Skip(SkipReason.AUDIO_UNSUPPORTED)
+        val audioOut = if (reencodeAudio || downmix) REENCODED_AUDIO else audio
+        val estimated = ((target + audioOut) * input.durationMs / 1000.0 / 8 * CONTAINER_OVERHEAD).toLong()
         if (estimated > input.sizeBytes * (1 - MIN_SAVING) || target < MIN_BITRATE) {
             return Plan.Skip(if (force) SkipReason.NO_GAIN else SkipReason.ALREADY_SMALL)
         }
@@ -196,6 +228,15 @@ object BitratePlanner {
             maxShortSide = quality.maxShortSide?.takeIf { outW != input.width || outH != input.height },
             toneMapHdr = input.isHdr,
             overridden = softReason,
+            convertToMp4 = convert,
+            downmixToStereo = downmix,
+            conversionNotes = if (!convert) emptyList() else buildList {
+                add("Saved as a new MP4 file with the same name, then the original is deleted.")
+                if (downmix) add("${input.audioChannels}-channel surround sound becomes stereo.")
+                else if (reencodeAudio) add("The sound is converted to AAC.")
+                if (input.audioTracks > 1) add("Only the first audio track is kept (this file has ${input.audioTracks}).")
+                if (input.subtitleTracks > 0) add("Built-in subtitles are dropped.")
+            },
         )
     }
 }

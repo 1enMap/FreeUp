@@ -22,6 +22,7 @@ class VideoRepository(private val context: Context) {
             MediaStore.Video.Media.DATE_TAKEN,
             MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
             MediaStore.Video.Media.CAPTURE_FRAMERATE,
+            MediaStore.Video.Media.RELATIVE_PATH,
         )
         val videos = mutableListOf<Video>()
         context.contentResolver.query(
@@ -42,6 +43,7 @@ class VideoRepository(private val context: Context) {
             val taken = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_TAKEN)
             val bucket = c.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
             val captureFps = c.getColumnIndexOrThrow(MediaStore.Video.Media.CAPTURE_FRAMERATE)
+            val relPath = c.getColumnIndexOrThrow(MediaStore.Video.Media.RELATIVE_PATH)
             while (c.moveToNext()) {
                 val videoId = c.getLong(id)
                 val rotated = c.getInt(orientation) % 180 != 0
@@ -59,6 +61,7 @@ class VideoRepository(private val context: Context) {
                     mime = c.getString(mime),
                     dateTakenMs = if (c.isNull(taken)) null else c.getLong(taken),
                     bucket = c.getString(bucket),
+                    relativePath = c.getString(relPath),
                     captureFps = if (c.isNull(captureFps)) null else c.getFloat(captureFps),
                 )
             }

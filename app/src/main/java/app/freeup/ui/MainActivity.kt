@@ -42,6 +42,10 @@ class MainActivity : ComponentActivity() {
             else -> Access.NONE
         }
     }
+
+    internal fun hasMediaLocation(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_MEDIA_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
 }
 
 private fun mediaPermissions(): Array<String> = when {
@@ -49,9 +53,14 @@ private fun mediaPermissions(): Array<String> = when {
         Manifest.permission.READ_MEDIA_VIDEO,
         Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
         Manifest.permission.POST_NOTIFICATIONS,
+        Manifest.permission.ACCESS_MEDIA_LOCATION,
     )
-    Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS)
-    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    Build.VERSION.SDK_INT >= 33 -> arrayOf(
+        Manifest.permission.READ_MEDIA_VIDEO,
+        Manifest.permission.POST_NOTIFICATIONS,
+        Manifest.permission.ACCESS_MEDIA_LOCATION,
+    )
+    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.ACCESS_MEDIA_LOCATION)
 }
 
 @Composable
@@ -60,18 +69,26 @@ private fun App(vm: MainViewModel) {
     val activity = LocalActivity.current as MainActivity
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        vm.onAccess(activity.currentAccess())
+        vm.onAccess(activity.currentAccess(), activity.hasMediaLocation())
     }
     val writeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         if (it.resultCode == Activity.RESULT_OK) vm.startCompressing()
     }
+    val deleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+        if (it.resultCode == Activity.RESULT_OK) vm.onOriginalsDeleted()
+    }
 
     // Re-check access when coming back: on Android 14 you may have changed which videos are shared.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        vm.onAccess(activity.currentAccess())
+        vm.onAccess(activity.currentAccess(), activity.hasMediaLocation())
     }
     LaunchedEffect(Unit) {
-        if (activity.currentAccess() == Access.NONE) permissionLauncher.launch(mediaPermissions())
+        when {
+            activity.currentAccess() == Access.NONE -> permissionLauncher.launch(mediaPermissions())
+            // Installs from before this permission existed already have video access, so ask for it on its own.
+            !activity.hasMediaLocation() ->
+                permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_MEDIA_LOCATION))
+        }
     }
 
     BackHandler(enabled = state.screen == Screen.CONFIRM) { vm.back() }
@@ -100,6 +117,9 @@ private fun App(vm: MainViewModel) {
             onClear = vm::clearSelection,
             onReview = vm::openConfirm,
             onAllowMore = { permissionLauncher.launch(mediaPermissions()) },
+            onDeleteOriginals = {
+                vm.deleteRequest()?.let { deleteLauncher.launch(IntentSenderRequest.Builder(it).build()) }
+            },
         )
     }
 }

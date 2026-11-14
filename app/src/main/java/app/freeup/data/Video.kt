@@ -14,6 +14,8 @@ data class Video(
     val mime: String?,
     val dateTakenMs: Long?,
     val bucket: String?,
+    /** Folder inside shared storage, e.g. "Download/" or "DCIM/Camera/". */
+    val relativePath: String?,
     /** Capture frame rate the camera recorded (slow motion is often 120/240), when MediaStore knows it. */
     val captureFps: Float?,
 )
@@ -30,4 +32,10 @@ data class Probe(
     val readable: Boolean = true,
     /** The file carries FreeUp's own "already compressed" tag. */
     val compressedByFreeUp: Boolean = false,
+    val audioMime: String? = null,
+    val audioChannels: Int? = null,
+    val audioTracks: Int = 0,
+    val subtitleTracks: Int = 0,
+    /** This phone lets apps decode the audio track (Dolby AC-3/E-AC-3 often isn't). */
+    val audioDecodable: Boolean = true,
 )

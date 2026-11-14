@@ -94,6 +94,7 @@ dependencies {
     implementation(libs.androidx.media3.common)
     implementation(libs.androidx.media3.muxer)
     implementation(libs.androidx.media3.container)
+    implementation(libs.androidx.media3.inspector)
     implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)

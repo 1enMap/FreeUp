@@ -53,6 +53,53 @@ object Replacer {
         return uri
     }
 
+    /**
+     * Saves [compressed] as a new .mp4 next to the original (same folder, same name with .mp4),
+     * checks it, and returns its uri. The original is not touched.
+     */
+    fun saveConverted(context: Context, compressed: File, originalName: String, relativePath: String?, dateTakenMs: Long?): Uri {
+        val resolver = context.contentResolver
+        val name = originalName.substringBeforeLast('.', originalName) + ".mp4"
+        val path = relativePath?.takeIf { it.isNotBlank() } ?: "${Environment.DIRECTORY_MOVIES}/"
+        // Android only lets each collection write to certain top-level folders.
+        val collection = when {
+            path.startsWith(Environment.DIRECTORY_DOWNLOADS) -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            path.startsWith(Environment.DIRECTORY_DCIM) || path.startsWith(Environment.DIRECTORY_MOVIES) ||
+                path.startsWith(Environment.DIRECTORY_PICTURES) -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            else -> null
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, if (collection != null) path else "${Environment.DIRECTORY_MOVIES}/FreeUp")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            dateTakenMs?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+        }
+        val target = collection ?: MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(target, values) ?: error("Couldn't create the MP4 file")
+        try {
+            val expected = sha256(compressed.inputStream())
+            resolver.openOutputStream(uri)!!.use { out -> compressed.inputStream().use { it.copyTo(out, 1 shl 20) } }
+            val written = resolver.openInputStream(uri)?.let(::sha256) ?: error("Couldn't read back the new file")
+            check(written.contentEquals(expected)) { "The written file doesn't match" }
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+        return uri
+    }
+
+    /** True if [uri] is a finished file of exactly [expectedSize] bytes. */
+    fun isComplete(context: Context, uri: Uri, expectedSize: Long): Boolean = runCatching {
+        context.contentResolver.openFileDescriptor(uri, "r")!!.use { it.statSize == expectedSize }
+    }.getOrDefault(false)
+
+    /** Deletes the original after a conversion. Throws SecurityException if Android wants you to confirm. */
+    fun deleteOriginal(context: Context, uri: Uri) {
+        context.contentResolver.delete(uri, null, null)
+    }
+
     /** The media scanner re-reads the file after a write; put the original capture date back. */
     private fun restoreDate(context: Context, uri: Uri, dateTakenMs: Long?) {
         if (dateTakenMs == null) return

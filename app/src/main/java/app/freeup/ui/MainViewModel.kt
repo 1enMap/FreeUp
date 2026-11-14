@@ -3,6 +3,7 @@ package app.freeup.ui
 import android.app.Application
 import android.content.IntentSender
 import android.provider.MediaStore
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
@@ -51,6 +52,7 @@ private data class Extras(
     val speedVersion: Int,
     val freed: Long,
     val storage: StorageInfo,
+    val awaitingDelete: List<JobItem>,
 )
 
 data class VideoRow(
@@ -97,6 +99,8 @@ data class UiState(
     val progress: BatchProgress? = null,
     val freedSoFar: Long = 0,
     val storage: StorageInfo = StorageInfo(),
+    /** Converted videos whose original Android wants you to confirm deleting. */
+    val awaitingDelete: List<JobItem> = emptyList(),
 ) {
     val selectedRows get() = rows.filter { it.video.id in selected && it.compress != null }
     val selectedSize get() = selectedRows.sumOf { it.video.sizeBytes }
@@ -108,6 +112,10 @@ data class UiState(
     /** Caveats from "Compress anyway" in the current selection, with how many videos each covers. */
     val selectedOverrides: List<Pair<app.freeup.engine.SkipReason, Int>>
         get() = selectedRows.mapNotNull { it.compress?.overridden }.groupingBy { it }.eachCount().toList()
+
+    /** Conversion notes across the selection, each with how many videos it applies to. */
+    val selectedConversionNotes: List<Pair<String, Int>>
+        get() = selectedRows.flatMap { it.compress?.conversionNotes.orEmpty() }.groupingBy { it }.eachCount().toList()
 
     /** Why the rest are left alone, most common first. */
     val skipCounts: List<Pair<SkipReason, Int>>
@@ -150,6 +158,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 audioBitrate = p?.audioBitrate,
                 isHdr = p?.isHdr == true,
                 sourceCodec = p?.videoMime,
+                audioMime = p?.audioMime,
+                audioChannels = p?.audioChannels,
+                audioTracks = p?.audioTracks ?: 1,
+                subtitleTracks = p?.subtitleTracks ?: 0,
+                audioDecodable = p?.audioDecodable ?: true,
                 readable = p?.readable ?: true,
                 alreadyDone = doneSizes[v.id] == v.sizeBytes || p?.compressedByFreeUp == true,
             )
@@ -183,9 +196,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         UiState(access = a, loading = l, rows = r, selected = s, quality = q)
     }
 
-    private val extras = combine(screen, measuring, speedVersion, dao.observeFreed(), storage) { sc, m, v, f, st ->
-        Extras(sc, m, v, f, st)
-    }
+    private val extras = combine(
+        combine(screen, measuring, speedVersion) { sc, m, v -> Triple(sc, m, v) },
+        dao.observeFreed(),
+        storage,
+        dao.observeAwaitingDelete(),
+    ) { (sc, m, v), f, st, awaiting -> Extras(sc, m, v, f, st, awaiting) }
 
     val state: StateFlow<UiState> = combine(base, extras, progress) { b, x, p ->
         val sc = x.screen
@@ -193,11 +209,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val eta = b.selectedRows.sumOf { speed.secondsFor(it.video.width, it.video.height, it.fps, it.video.durationMs) }
         // Show progress whenever a batch is still going, even after the app was reopened.
         val effectiveScreen = if (p?.running == true) Screen.PROGRESS else sc
-        b.copy(screen = effectiveScreen, measuringSpeed = m, etaSeconds = eta.toLong(), progress = p, freedSoFar = x.freed, storage = x.storage)
+        b.copy(screen = effectiveScreen, measuringSpeed = m, etaSeconds = eta.toLong(), progress = p, freedSoFar = x.freed, storage = x.storage, awaitingDelete = x.awaitingDelete)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
 
-    fun onAccess(newAccess: Access) {
+    private var mediaLocation = false
+
+    fun onAccess(newAccess: Access, mediaLocationGranted: Boolean) {
         access.value = newAccess
+        // Headers read before this was granted have their GPS tag hidden; read them again.
+        if (mediaLocationGranted != mediaLocation) {
+            mediaLocation = mediaLocationGranted
+            probeJob?.cancel()
+            probes.value = emptyMap()
+        }
         if (newAccess != Access.NONE) reload()
     }
 
@@ -313,6 +337,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 maxShortSide = plan.maxShortSide,
                 toneMapHdr = plan.toneMapHdr,
                 overridden = plan.overridden?.name,
+                convertToMp4 = plan.convertToMp4,
+                downmixToStereo = plan.downmixToStereo,
+                audioChannels = row.probe?.audioChannels,
+                relativePath = row.video.relativePath,
                 dateTakenMs = row.video.dateTakenMs,
                 creationTimeMs = row.probe?.creationTimeMs,
                 latitude = row.probe?.location?.first,
@@ -329,6 +357,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stop() = Jobs.stop(getApplication())
+
+    /** Android's own dialog to delete originals that were converted to MP4. */
+    fun deleteRequest(): IntentSender? {
+        val uris = state.value.awaitingDelete.map { it.uri.toUri() }
+        if (uris.isEmpty()) return null
+        return MediaStore.createDeleteRequest(getApplication<Application>().contentResolver, uris).intentSender
+    }
+
+    fun onOriginalsDeleted() {
+        val items = state.value.awaitingDelete
+        viewModelScope.launch {
+            items.forEach { dao.update(it.copy(state = JobState.DONE, reason = null)) }
+            reload()
+        }
+    }
 
     fun finishProgress() {
         screen.value = Screen.GRID

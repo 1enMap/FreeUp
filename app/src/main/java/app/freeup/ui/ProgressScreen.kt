@@ -155,6 +155,7 @@ private fun statusText(item: JobItem, fraction: Float?): String = when (item.sta
         val saved = item.originalSize - (item.newSize ?: item.originalSize)
         "${formatBytes(item.originalSize)} → ${formatBytes(item.newSize ?: 0)} · freed ${formatBytes(saved)}"
     }
+    JobState.AWAITING_DELETE -> "MP4 saved · ${formatBytes(item.newSize ?: 0)}"
     JobState.SKIPPED -> "Kept the original"
     JobState.FAILED -> "Not compressed"
     JobState.CANCELLED -> "Stopped, original kept"

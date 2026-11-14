@@ -74,6 +74,7 @@ fun VideoGridScreen(
     onReview: () -> Unit,
     onQuality: (Quality) -> Unit,
     onAllowMore: () -> Unit,
+    onDeleteOriginals: () -> Unit,
 ) {
     var filter by rememberSaveable { mutableStateOf(Filter.ALL) }
     var sheetFor by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -99,6 +100,9 @@ fun VideoGridScreen(
             modifier = Modifier.statusBarsPadding(),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) { Header(state) }
+            if (state.awaitingDelete.isNotEmpty()) {
+                item(span = { GridItemSpan(maxLineSpan) }) { AwaitingDeleteCard(state, onDeleteOriginals) }
+            }
             item(span = { GridItemSpan(maxLineSpan) }) { Hero(state, onSelectTop, onAllowMore) }
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column {
@@ -167,6 +171,30 @@ private fun Header(state: UiState) {
             Spacer(Modifier.height(14.dp))
             StorageBar(state.storage, state.totalSize, state.totalSaving)
         }
+    }
+}
+
+/** Converted videos are saved as MP4; Android asks you before FreeUp deletes their originals. */
+@Composable
+private fun AwaitingDeleteCard(state: UiState, onDeleteOriginals: () -> Unit) {
+    val accents = LocalAccents.current
+    val items = state.awaitingDelete
+    val frees = items.sumOf { it.originalSize }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(accents.savingContainer).padding(18.dp),
+    ) {
+        Text(
+            "${items.size} ${if (items.size == 1) "video was" else "videos were"} converted to MP4",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            "The new MP4 is saved and checked. Delete the original to free ${formatBytes(frees)}.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onDeleteOriginals) { Text(if (items.size == 1) "Delete original" else "Delete ${items.size} originals") }
     }
 }
 
@@ -295,6 +323,7 @@ private fun VideoCell(row: VideoRow, selected: Boolean, onClick: () -> Unit, onL
         Text(
             text = when {
                 row.forced -> "Anyway · saves ${formatBytes(row.saving)}"
+                compress?.convertToMp4 == true -> "→ MP4 · saves ${formatBytes(row.saving)}"
                 compress != null -> "saves ${formatBytes(row.saving)}"
                 else -> row.skip!!.reason.label
             },
@@ -352,13 +381,17 @@ private fun VideoSheet(
             // A video FreeUp would compress on its own.
             row.compress != null && !row.forced -> {
                 Text(quality.caveat, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (row.compress!!.conversionNotes.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    CautionCard("This file is converted to MP4", row.compress!!.conversionNotes)
+                }
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = onToggle, modifier = Modifier.fillMaxWidth()) { Text(if (selected) "Don't compress" else "Select") }
             }
             // Already chosen with "Compress anyway".
             row.forced -> {
                 val reason = row.compress!!.overridden!!
-                CautionCard("You chose to compress this anyway", listOfNotNull(reason.caveat, quality.caveat))
+                CautionCard("You chose to compress this anyway", listOfNotNull(reason.caveat, quality.caveat) + row.compress!!.conversionNotes)
                 Spacer(Modifier.height(16.dp))
                 OutlinedButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) { Text("Don't compress") }
             }
@@ -367,7 +400,10 @@ private fun VideoSheet(
                 Text("Why FreeUp skipped it", style = MaterialTheme.typography.titleSmall)
                 Text(skip.reason.why, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
                 Spacer(Modifier.height(14.dp))
-                CautionCard("If you compress it anyway", listOfNotNull(skip.reason.caveat, quality.caveat, "The original is replaced and can't be restored."))
+                CautionCard(
+                    "If you compress it anyway",
+                    listOfNotNull(skip.reason.caveat, quality.caveat) + row.anyway.conversionNotes + "The original is replaced and can't be restored.",
+                )
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = onCompressAnyway,

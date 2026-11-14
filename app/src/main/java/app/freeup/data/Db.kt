@@ -25,6 +25,9 @@ object JobState {
     /** Overwriting the original. If we die here, the checked copy in [JobItem.workFile] is rewritten on restart. */
     const val WRITING = "writing"
     const val DONE = "done"
+
+    /** Converted copy saved, but Android wants you to confirm deleting the original. */
+    const val AWAITING_DELETE = "awaiting_delete"
     const val SKIPPED = "skipped"
     const val FAILED = "failed"
     const val CANCELLED = "cancelled"
@@ -54,6 +57,14 @@ data class JobItem(
     val toneMapHdr: Boolean = false,
     /** The skip reason you overrode with "Compress anyway", if any. */
     val overridden: String? = null,
+    /** Not MP4/MOV: save a new .mp4 and delete the original, instead of replacing it in place. */
+    val convertToMp4: Boolean = false,
+    val downmixToStereo: Boolean = false,
+    val audioChannels: Int? = null,
+    /** Folder of the original, where the converted .mp4 goes. */
+    val relativePath: String? = null,
+    /** The converted .mp4 once it's saved; the original is deleted after this is set. */
+    val newUri: String? = null,
     val dateTakenMs: Long?,
     val creationTimeMs: Long?,
     val latitude: Float?,
@@ -99,11 +110,14 @@ interface JobDao {
     @Query("SELECT COALESCE(SUM(originalSize - newSize), 0) FROM job_items WHERE state = :done AND newSize IS NOT NULL")
     fun observeFreed(done: String = JobState.DONE): Flow<Long>
 
+    @Query("SELECT * FROM job_items WHERE state = :awaiting ORDER BY batchId, position")
+    fun observeAwaitingDelete(awaiting: String = JobState.AWAITING_DELETE): Flow<List<JobItem>>
+
     @Query("SELECT mediaId, newSize FROM job_items WHERE state = :done AND newSize IS NOT NULL")
     fun observeDone(done: String = JobState.DONE): Flow<List<DoneRecord>>
 }
 
-@Database(entities = [JobItem::class], version = 2)
+@Database(entities = [JobItem::class], version = 3)
 abstract class AppDb : RoomDatabase() {
     abstract fun jobs(): JobDao
 
@@ -119,9 +133,20 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        /** Adds converting MKV and other formats to MP4. */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE job_items ADD COLUMN convertToMp4 INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN downmixToStereo INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN audioChannels INTEGER")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN relativePath TEXT")
+                db.execSQL("ALTER TABLE job_items ADD COLUMN newUri TEXT")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "freeup.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build().also { instance = it }
         }
     }

@@ -99,14 +99,36 @@ class BitratePlannerTest {
         // A tiny low-bitrate clip has nothing to gain even when forced.
         assertEquals(Plan.Skip(SkipReason.NO_GAIN), BitratePlanner.plan(input(0.5, 10, 480, 360), Quality.BALANCED, true, force = true))
         // Unsupported formats can never be forced.
-        assertEquals(Plan.Skip(SkipReason.UNSUPPORTED), BitratePlanner.plan(input(400.0, 60, mime = "video/webm"), Quality.BALANCED, true, force = true))
+        assertEquals(Plan.Skip(SkipReason.UNSUPPORTED), BitratePlanner.plan(input(400.0, 60, mime = "video/x-ms-wmv"), Quality.BALANCED, true, force = true))
+    }
+
+    @Test fun mkvIsConvertedWithItsCaveats() {
+        // A 2h18 1080p H.264 film in MKV with 5.1 E-AC3 and subtitles, ~7 GB.
+        val film = PlanInput(
+            sizeBytes = 6_985_233_384, durationMs = 8_297_184, width = 1920, height = 800,
+            containerMime = "video/matroska", fps = 24f, captureFps = null, audioBitrate = 640_000,
+            isHdr = false, sourceCodec = BitratePlanner.AVC, audioMime = "audio/eac3", audioChannels = 6,
+            audioTracks = 2, subtitleTracks = 1,
+        )
+        val plan = BitratePlanner.plan(film, Quality.SMALLEST, true) as Plan.Compress
+        assertTrue(plan.convertToMp4)
+        assertTrue(plan.downmixToStereo)
+        assertEquals(1728 to 720, plan.outWidth to plan.outHeight)
+        assertTrue("estimated ${plan.estimatedBytes}", plan.estimatedBytes in 2_000_000_000L..3_000_000_000L)
+        assertEquals(4, plan.conversionNotes.size)
+        // The same film when this phone can't decode its Dolby sound.
+        assertEquals(Plan.Skip(SkipReason.AUDIO_UNSUPPORTED), BitratePlanner.plan(film.copy(audioDecodable = false), Quality.SMALLEST, true))
+        assertEquals(Plan.Skip(SkipReason.AUDIO_UNSUPPORTED), BitratePlanner.plan(film.copy(audioDecodable = false), Quality.SMALLEST, true, force = true))
+        // MP4s are never converted.
+        val mp4 = BitratePlanner.plan(input(128.0, 60), Quality.BALANCED, true) as Plan.Compress
+        assertTrue(!mp4.convertToMp4 && mp4.conversionNotes.isEmpty())
     }
 
     @Test fun hdrSlowMotionAndOtherContainersAreSkipped() {
         assertEquals(Plan.Skip(SkipReason.HDR), BitratePlanner.plan(input(400.0, 60, hdr = true), Quality.BALANCED, true))
         assertEquals(Plan.Skip(SkipReason.HIGH_FPS), BitratePlanner.plan(input(400.0, 60, fps = 120f), Quality.BALANCED, true))
         assertEquals(Plan.Skip(SkipReason.HIGH_FPS), BitratePlanner.plan(input(400.0, 60, captureFps = 240f), Quality.BALANCED, true))
-        assertEquals(Plan.Skip(SkipReason.UNSUPPORTED), BitratePlanner.plan(input(400.0, 60, mime = "video/webm"), Quality.BALANCED, true))
+        assertEquals(Plan.Skip(SkipReason.UNSUPPORTED), BitratePlanner.plan(input(400.0, 60, mime = "video/x-ms-wmv"), Quality.BALANCED, true))
     }
 
     @Test fun withoutHevcFallsBackToAvcAtHigherBitrate() {

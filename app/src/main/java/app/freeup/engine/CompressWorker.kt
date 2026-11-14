@@ -94,7 +94,9 @@ class CompressWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
 
         val freeBytes = StatFs(applicationContext.noBackupFilesDir.path).availableBytes
-        if (freeBytes < item.estimatedSize * 1.3 + 50L * 1024 * 1024) {
+        // A conversion briefly holds the work file and the new MP4 next to the original.
+        val needed = item.estimatedSize * (if (item.convertToMp4) 2.3 else 1.3) + 50L * 1024 * 1024
+        if (freeBytes < needed) {
             dao.update(item.copy(state = JobState.SKIPPED, reason = "Not enough free space to work", finishedAt = now()))
             return@coroutineScope null
         }
@@ -131,6 +133,7 @@ class CompressWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     metadata = metadata,
                     maxShortSide = item.maxShortSide,
                     toneMapHdr = item.toneMapHdr,
+                    downmixFromChannels = if (item.downmixToStereo) item.audioChannels else null,
                     onProgress = { currentFraction = it },
                 )
             }
@@ -180,6 +183,10 @@ class CompressWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         status = "Saving ${item.name}"
         runCatching { setForeground(foregroundInfo(status, 1f, null)) }
+        if (item.convertToMp4) {
+            writeConverted(item, file)
+            return@withContext
+        }
         val writing = item.copy(state = JobState.WRITING).also { dao.update(it) }
         val uri = item.uri.toUri()
         try {
@@ -203,6 +210,46 @@ class CompressWorker(context: Context, params: WorkerParameters) : CoroutineWork
             } else {
                 saveAsNew(writing, file)
             }
+        }
+    }
+
+    /**
+     * For MKV and other formats: save the checked copy as a new .mp4 next to the original, then
+     * delete the original. The original is never touched until the new file is verified, so a
+     * crash at any point loses nothing (at worst both files exist for a moment).
+     */
+    private suspend fun writeConverted(item: JobItem, file: File) {
+        var current = item.copy(state = JobState.WRITING).also { dao.update(it) }
+        // Resuming: a previous run may already have saved the MP4.
+        val existing = current.newUri?.toUri()
+        if (existing != null && !Replacer.isComplete(applicationContext, existing, file.length())) {
+            runCatching { applicationContext.contentResolver.delete(existing, null, null) }
+            current = current.copy(newUri = null).also { dao.update(it) }
+        }
+        if (current.newUri == null) {
+            val saved = runCatching {
+                Replacer.saveConverted(applicationContext, file, item.name, item.relativePath, item.dateTakenMs)
+            }
+            if (saved.isFailure) {
+                dao.update(current.copy(state = JobState.FAILED, reason = "Couldn't save the MP4, original kept", finishedAt = now()))
+                file.delete()
+                return
+            }
+            current = current.copy(newUri = saved.getOrThrow().toString()).also { dao.update(it) }
+        }
+        file.delete()
+        try {
+            Replacer.deleteOriginal(applicationContext, item.uri.toUri())
+            dao.update(current.copy(state = JobState.DONE, newSize = current.newSize, finishedAt = now()))
+        } catch (e: SecurityException) {
+            // Android wants you to confirm the delete; the app asks next time you open it.
+            dao.update(
+                current.copy(
+                    state = JobState.AWAITING_DELETE,
+                    reason = "MP4 saved. Confirm in FreeUp to delete the original",
+                    finishedAt = now(),
+                ),
+            )
         }
     }
 

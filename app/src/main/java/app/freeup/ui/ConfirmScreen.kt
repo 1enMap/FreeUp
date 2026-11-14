@@ -53,6 +53,9 @@ fun ConfirmScreen(
         state.selectedOverrides.forEach { (reason, n) ->
             reason.caveat?.let { add("${reason.label} ($n ${if (n == 1) "video" else "videos"}, compressed anyway): $it") }
         }
+        state.selectedConversionNotes.forEach { (note, n) ->
+            add(if (state.selectedRows.size == 1) "Converting to MP4: $note" else "Converting to MP4 ($n ${if (n == 1) "video" else "videos"}): $note")
+        }
         add("Originals are replaced and can't be restored. Each video is checked first, and if anything looks wrong its original is kept.")
     }
 
@@ -123,6 +126,7 @@ fun ConfirmScreen(
                                 append(formatDuration(row.video.durationMs))
                                 if (plan.maxShortSide != null) append(" · ${row.video.height.coerceAtMost(row.video.width)}p → ${plan.maxShortSide}p")
                                 if (plan.toneMapHdr) append(" · HDR → SDR")
+                                if (plan.convertToMp4) append(" · ${row.video.name.substringAfterLast('.', "").uppercase()} → MP4")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

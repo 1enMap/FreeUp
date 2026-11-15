@@ -27,3 +27,7 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew testDebugUnitTest
 ```
 
 Requires Android 11 or newer.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
